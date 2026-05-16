@@ -21,8 +21,12 @@ TestSessionLocal = async_sessionmaker(test_engine, expire_on_commit=False)
 FAKE_RESPONSE = ("Paris is the capital of France.", "[system]: You are Arca...\n[user]: test")
 
 
-@pytest_asyncio.fixture(scope="session", autouse=True)
-async def create_tables():
+# scope="session" + loop_scope="session" → one event loop for the whole test run.
+# This prevents asyncpg's "Future attached to a different loop" error that occurs
+# when function-scoped tests spawn their own loops but the engine pool was created
+# on the session loop.
+@pytest_asyncio.fixture(scope="session", loop_scope="session", autouse=True)
+async def create_tables() -> AsyncGenerator[None, None]:
     async with test_engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
     yield
@@ -30,13 +34,13 @@ async def create_tables():
         await conn.run_sync(Base.metadata.drop_all)
 
 
-@pytest_asyncio.fixture
+@pytest_asyncio.fixture(loop_scope="session")
 async def db_session() -> AsyncGenerator[AsyncSession, None]:
     async with TestSessionLocal() as session:
         yield session
 
 
-@pytest_asyncio.fixture
+@pytest_asyncio.fixture(loop_scope="session")
 async def client(db_session: AsyncSession) -> AsyncGenerator[AsyncClient, None]:
     async def override_get_db() -> AsyncGenerator[AsyncSession, None]:
         yield db_session
@@ -63,7 +67,10 @@ async def test_chat_returns_response(client: AsyncClient) -> None:
 @pytest.mark.asyncio
 async def test_chat_logs_trace(client: AsyncClient) -> None:
     with patch("app.agent.run", new_callable=AsyncMock, return_value=FAKE_RESPONSE):
-        chat_resp = await client.post("/chat", json={"message": "Trace log test", "session_id": "sess-trace-test"})
+        chat_resp = await client.post(
+            "/chat",
+            json={"message": "Trace log test", "session_id": "sess-trace-test"},
+        )
     assert chat_resp.status_code == 200
     trace_id = chat_resp.json()["trace_id"]
 
@@ -76,7 +83,10 @@ async def test_chat_logs_trace(client: AsyncClient) -> None:
 @pytest.mark.asyncio
 async def test_feedback_updates_trace(client: AsyncClient) -> None:
     with patch("app.agent.run", new_callable=AsyncMock, return_value=FAKE_RESPONSE):
-        chat_resp = await client.post("/chat", json={"message": "Feedback test", "session_id": "sess-fb-test"})
+        chat_resp = await client.post(
+            "/chat",
+            json={"message": "Feedback test", "session_id": "sess-fb-test"},
+        )
     assert chat_resp.status_code == 200
     trace_id = chat_resp.json()["trace_id"]
 
