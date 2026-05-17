@@ -1,19 +1,21 @@
 import logging
 import time
-import uuid
 from contextlib import asynccontextmanager
 
 from fastapi import Depends, FastAPI, HTTPException, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app import orchestrator, tracer
-from app.agent import AGENT_ID
+from app.agents import REGISTRY
+from app.config import settings
 from app.database import get_db
 from app.schemas import (
+    AgentOut,
     ChatRequest,
     ChatResponse,
     FeedbackRequest,
     FeedbackResponse,
+    HealthOut,
     ReportResponse,
     TraceOut,
 )
@@ -24,13 +26,15 @@ logger = logging.getLogger(__name__)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    logger.info("Arca API starting up")
+    logger.info("Arca API starting up — env=%s agents=%d", settings.app_env, len(REGISTRY))
     yield
     logger.info("Arca API shutting down")
 
 
-app = FastAPI(title="Arca", version="0.1.0", lifespan=lifespan)
+app = FastAPI(title="Arca", version="0.2.0", lifespan=lifespan)
 
+
+# ─── Phase 1 endpoints (unchanged behaviour) ──────────────────────────────────
 
 @app.post("/chat", response_model=ChatResponse)
 async def chat(body: ChatRequest, db: AsyncSession = Depends(get_db)) -> ChatResponse:
@@ -38,9 +42,13 @@ async def chat(body: ChatRequest, db: AsyncSession = Depends(get_db)) -> ChatRes
     response_text: str | None = None
     error: str | None = None
     prompt_used: str | None = None
+    agent_id: str = "agent-1"  # default — overwritten on success
 
     try:
-        response_text, prompt_used = await orchestrator.handle(body.message, body.session_id)
+        result = await orchestrator.handle(body.message, body.session_id)
+        response_text = result["response"]
+        prompt_used = result["prompt_used"]
+        agent_id = result["agent_id"]
     except Exception as exc:
         error = str(exc)
         logger.error("Agent error: %s", error)
@@ -50,7 +58,7 @@ async def chat(body: ChatRequest, db: AsyncSession = Depends(get_db)) -> ChatRes
     trace_id = await tracer.write_trace(
         db,
         session_id=body.session_id,
-        agent_id=AGENT_ID,
+        agent_id=agent_id,
         input=body.message,
         output=response_text,
         prompt_used=prompt_used,
@@ -61,7 +69,12 @@ async def chat(body: ChatRequest, db: AsyncSession = Depends(get_db)) -> ChatRes
     if error:
         raise HTTPException(status_code=500, detail=error)
 
-    return ChatResponse(response=response_text, trace_id=trace_id, latency_ms=latency_ms)
+    return ChatResponse(
+        response=response_text,
+        trace_id=trace_id,
+        agent_id=agent_id,
+        latency_ms=latency_ms,
+    )
 
 
 @app.post("/feedback", response_model=FeedbackResponse)
@@ -84,3 +97,24 @@ async def list_traces(
 @app.get("/report", response_model=ReportResponse)
 async def report(db: AsyncSession = Depends(get_db)) -> ReportResponse:
     return await tracer.get_report(db)
+
+
+# ─── Phase 2 endpoints ────────────────────────────────────────────────────────
+
+@app.get("/agents", response_model=list[AgentOut])
+async def list_agents() -> list[AgentOut]:
+    """Returns all registered agents with their IDs and descriptions."""
+    return [
+        AgentOut(agent_id=agent_id, description=meta["description"])
+        for agent_id, meta in REGISTRY.items()
+    ]
+
+
+@app.get("/health", response_model=HealthOut)
+async def health() -> HealthOut:
+    """Health check — used by Cloud Run and load balancers."""
+    return HealthOut(
+        status="ok",
+        env=settings.app_env,
+        agents_active=len(REGISTRY),
+    )

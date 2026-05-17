@@ -13,6 +13,7 @@ class ChatRequest(BaseModel):
 class ChatResponse(BaseModel):
     response: str
     trace_id: uuid.UUID
+    agent_id: str        # which agent handled this request
     latency_ms: int
 
 
@@ -50,3 +51,14 @@ class ReportResponse(BaseModel):
     error_count: int
     feedback: FeedbackSummary
     generated_at: datetime
+
+
+class AgentOut(BaseModel):
+    agent_id: str
+    description: str
+
+
+class HealthOut(BaseModel):
+    status: str
+    env: str
+    agents_active: int
