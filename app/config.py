@@ -8,6 +8,17 @@ class Settings(BaseSettings):
     database_url: str
     app_env: str = "development"
 
+    @property
+    def async_database_url(self) -> str:
+        """Ensure the URL always uses the asyncpg driver.
+        Railway (and some other providers) give a plain postgresql:// URL.
+        """
+        return self.database_url.replace(
+            "postgresql://", "postgresql+asyncpg://"
+        ).replace(
+            "postgres://", "postgresql+asyncpg://"
+        )
+
     class Config:
         env_file = ".env"
         env_file_encoding = "utf-8"

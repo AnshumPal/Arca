@@ -49,60 +49,21 @@ jobs:
       - name: Build Docker image
         run: docker build .
 
-  # Checks whether GCP secrets are configured in this repo.
-  # The deploy job uses this output to skip cleanly when GCP isn't ready.
-  check-gcp:
-    runs-on: ubuntu-latest
-    outputs:
-      ready: ${{ steps.check.outputs.ready }}
-    steps:
-      - id: check
-        env:
-          GCP_SA_KEY: ${{ secrets.GCP_SA_KEY }}
-          GCP_PROJECT_ID: ${{ secrets.GCP_PROJECT_ID }}
-        run: |
-          if [ -n "$GCP_SA_KEY" ] && [ -n "$GCP_PROJECT_ID" ]; then
-            echo "ready=true" >> $GITHUB_OUTPUT
-          else
-            echo "ready=false" >> $GITHUB_OUTPUT
-            echo "GCP secrets not configured — skipping deploy."
-          fi
-
-  deploy:
-    needs: [test, check-gcp]
+  # Railway auto-deploys on push via GitHub integration — no CI step needed.
+  # This job just confirms the deployment URL is reachable after Railway deploys.
+  verify-deploy:
+    needs: test
     runs-on: ubuntu-latest
     if: |
       github.ref == 'refs/heads/main' &&
       github.event_name == 'push' &&
-      needs.check-gcp.outputs.ready == 'true'
+      vars.RAILWAY_URL != ''
 
     steps:
-      - uses: actions/checkout@v4
+      - name: Wait for Railway deploy
+        run: sleep 30
 
-      - name: Authenticate to GCP
-        uses: google-github-actions/auth@v2
-        with:
-          credentials_json: ${{ secrets.GCP_SA_KEY }}
-
-      - name: Set up gcloud
-        uses: google-github-actions/setup-gcloud@v2
-
-      - name: Configure Docker for Artifact Registry
-        run: gcloud auth configure-docker asia-south1-docker.pkg.dev
-
-      - name: Build and push image
+      - name: Health check live URL
         run: |
-          IMAGE=asia-south1-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/arca-repo/arca:${{ github.sha }}
-          docker build -t $IMAGE .
-          docker push $IMAGE
-
-      - name: Deploy to Cloud Run
-        run: |
-          IMAGE=asia-south1-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/arca-repo/arca:${{ github.sha }}
-          gcloud run deploy arca \
-            --image $IMAGE \
-            --region asia-south1 \
-            --platform managed \
-            --allow-unauthenticated \
-            --set-env-vars "APP_ENV=production" \
-            --set-secrets "OPENAI_API_KEY=arca-openai-key:latest,DATABASE_URL=arca-db-url:latest"
+          curl --fail --retry 5 --retry-delay 10 \
+            ${{ vars.RAILWAY_URL }}/health
