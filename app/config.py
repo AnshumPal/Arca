@@ -10,14 +10,27 @@ class Settings(BaseSettings):
 
     @property
     def async_database_url(self) -> str:
-        """Ensure the URL always uses the asyncpg driver.
-        Railway (and some other providers) give a plain postgresql:// URL.
+        """Ensure the URL is compatible with asyncpg.
+        Handles Neon / Railway / Render connection strings which may use
+        plain postgresql:// and unsupported parameters like channel_binding.
         """
-        return self.database_url.replace(
+        from urllib.parse import parse_qs, urlencode, urlparse, urlunparse
+
+        url = self.database_url.replace(
             "postgresql://", "postgresql+asyncpg://"
         ).replace(
             "postgres://", "postgresql+asyncpg://"
         )
+
+        # Fix query parameters — asyncpg uses ssl=require not sslmode=require
+        parsed = urlparse(url)
+        params = parse_qs(parsed.query, keep_blank_values=True)
+        params.pop("channel_binding", None)   # not supported by asyncpg
+        if "sslmode" in params:
+            params["ssl"] = params.pop("sslmode")
+
+        fixed_query = urlencode({k: v[0] for k, v in params.items()})
+        return urlunparse(parsed._replace(query=fixed_query))
 
     class Config:
         env_file = ".env"
