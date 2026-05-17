@@ -49,10 +49,32 @@ jobs:
       - name: Build Docker image
         run: docker build .
 
-  deploy:
-    needs: test
+  # Checks whether GCP secrets are configured in this repo.
+  # The deploy job uses this output to skip cleanly when GCP isn't ready.
+  check-gcp:
     runs-on: ubuntu-latest
-    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    outputs:
+      ready: ${{ steps.check.outputs.ready }}
+    steps:
+      - id: check
+        env:
+          GCP_SA_KEY: ${{ secrets.GCP_SA_KEY }}
+          GCP_PROJECT_ID: ${{ secrets.GCP_PROJECT_ID }}
+        run: |
+          if [ -n "$GCP_SA_KEY" ] && [ -n "$GCP_PROJECT_ID" ]; then
+            echo "ready=true" >> $GITHUB_OUTPUT
+          else
+            echo "ready=false" >> $GITHUB_OUTPUT
+            echo "GCP secrets not configured — skipping deploy."
+          fi
+
+  deploy:
+    needs: [test, check-gcp]
+    runs-on: ubuntu-latest
+    if: |
+      github.ref == 'refs/heads/main' &&
+      github.event_name == 'push' &&
+      needs.check-gcp.outputs.ready == 'true'
 
     steps:
       - uses: actions/checkout@v4
