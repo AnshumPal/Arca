@@ -1,53 +1,9 @@
-import os
-from collections.abc import AsyncGenerator
 from unittest.mock import AsyncMock, patch
 
 import pytest
-import pytest_asyncio
-from httpx import ASGITransport, AsyncClient
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
-
-from app.database import Base, get_db
-from app.main import app
-
-TEST_DATABASE_URL = os.environ.get(
-    "TEST_DATABASE_URL",
-    os.environ.get("DATABASE_URL", "postgresql+asyncpg://arca:arca@localhost:5432/arca"),
-)
-
-test_engine = create_async_engine(TEST_DATABASE_URL, echo=False)
-TestSessionLocal = async_sessionmaker(test_engine, expire_on_commit=False)
+from httpx import AsyncClient
 
 FAKE_RESPONSE = ("Paris is the capital of France.", "[system]: You are Arca...\n[user]: test")
-
-
-# scope="session" + loop_scope="session" → one event loop for the whole run.
-# Prevents asyncpg "Future attached to a different loop" error.
-@pytest_asyncio.fixture(scope="session", loop_scope="session", autouse=True)
-async def create_tables() -> AsyncGenerator[None, None]:
-    async with test_engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
-    yield
-    async with test_engine.begin() as conn:
-        await conn.run_sync(Base.metadata.drop_all)
-
-
-@pytest_asyncio.fixture(loop_scope="session")
-async def db_session() -> AsyncGenerator[AsyncSession, None]:
-    async with TestSessionLocal() as session:
-        yield session
-
-
-@pytest_asyncio.fixture(loop_scope="session")
-async def client(db_session: AsyncSession) -> AsyncGenerator[AsyncClient, None]:
-    async def override_get_db() -> AsyncGenerator[AsyncSession, None]:
-        yield db_session
-
-    app.dependency_overrides[get_db] = override_get_db
-    transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://test") as ac:
-        yield ac
-    app.dependency_overrides.clear()
 
 
 # ─── Phase 1 tests (unchanged) ───────────────────────────────────────────────
