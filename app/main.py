@@ -24,7 +24,15 @@ from app.eval_schemas import (
     EvalRunResponse,
     EvalScoreOut,
 )
-from app.models import EvalRun, EvalScore, SandboxAgent, SandboxEvalScore, SandboxTrace
+from app.models import EvalRun, EvalScore, OptimizerRun, SandboxAgent, SandboxEvalScore, SandboxTrace
+from app.optimizer import run_optimizer_cycle
+from app.optimizer_schemas import (
+    FailurePatternOut,
+    OptimizerRunDetail,
+    OptimizerRunSummary,
+    ProposalOut,
+    ScheduleOut,
+)
 from app.sandbox import (
     create_sandbox,
     delete_sandbox,
@@ -41,6 +49,7 @@ from app.sandbox_schemas import (
     SandboxDetailOut,
     SandboxOut,
 )
+from app.scheduler import scheduler, start_scheduler, stop_scheduler
 from app.schemas import (
     AgentOut,
     ChatRequest,
@@ -58,12 +67,14 @@ logger = logging.getLogger(__name__)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    start_scheduler()
     logger.info("Arca API starting up — env=%s agents=%d", settings.app_env, len(REGISTRY))
     yield
+    stop_scheduler()
     logger.info("Arca API shutting down")
 
 
-app = FastAPI(title="Arca", version="0.4.0", lifespan=lifespan)
+app = FastAPI(title="Arca", version="0.5.0", lifespan=lifespan)
 
 
 # ─── Phase 1 endpoints ────────────────────────────────────────────────────────
@@ -102,10 +113,8 @@ async def chat(
         error=error,
     )
 
-    # Phase 3: background eval
     background_tasks.add_task(run_eval_for_trace_bg, str(trace_id))
 
-    # Phase 4: shadow execution for all active sandboxes matching this agent
     active_sandboxes = await get_active_sandboxes_for_agent(agent_id, db)
     for sandbox in active_sandboxes:
         background_tasks.add_task(
@@ -153,8 +162,8 @@ async def report(db: AsyncSession = Depends(get_db)) -> ReportResponse:
 @app.get("/agents", response_model=list[AgentOut])
 async def list_agents() -> list[AgentOut]:
     return [
-        AgentOut(agent_id=agent_id, description=meta["description"])
-        for agent_id, meta in REGISTRY.items()
+        AgentOut(agent_id=aid, description=meta["description"])
+        for aid, meta in REGISTRY.items()
     ]
 
 
@@ -200,11 +209,7 @@ async def eval_scores(
                 overall_score=run.overall_score,
                 evaluated_at=run.evaluated_at,
                 dimensions=[
-                    DimensionScoreOut(
-                        dimension=s.dimension,
-                        score=s.score,
-                        reasoning=s.reasoning or "",
-                    )
+                    DimensionScoreOut(dimension=s.dimension, score=s.score, reasoning=s.reasoning or "")
                     for s in scores
                 ],
             )
@@ -219,23 +224,17 @@ async def eval_report(db: AsyncSession = Depends(get_db)) -> EvalReportOut:
 
     agent_stmt = text(
         """
-        SELECT
-            er.agent_id,
-            COUNT(er.id)                                     AS traces_evaluated,
-            AVG(er.overall_score)                            AS overall_avg,
-            AVG(CASE WHEN es.dimension = 'latency'  THEN es.score END) AS latency_avg,
-            AVG(CASE WHEN es.dimension = 'length'   THEN es.score END) AS length_avg,
-            AVG(CASE WHEN es.dimension = 'feedback' THEN es.score END) AS feedback_avg,
-            AVG(CASE WHEN es.dimension = 'error'    THEN es.score END) AS error_avg
-        FROM eval_runs er
-        JOIN eval_scores es ON es.eval_run_id = er.id
-        GROUP BY er.agent_id
-        ORDER BY er.agent_id
+        SELECT er.agent_id, COUNT(er.id) AS traces_evaluated, AVG(er.overall_score) AS overall_avg,
+               AVG(CASE WHEN es.dimension='latency'  THEN es.score END) AS latency_avg,
+               AVG(CASE WHEN es.dimension='length'   THEN es.score END) AS length_avg,
+               AVG(CASE WHEN es.dimension='feedback' THEN es.score END) AS feedback_avg,
+               AVG(CASE WHEN es.dimension='error'    THEN es.score END) AS error_avg
+        FROM eval_runs er JOIN eval_scores es ON es.eval_run_id = er.id
+        GROUP BY er.agent_id ORDER BY er.agent_id
         """
     )
     result = await db.execute(agent_stmt)
     rows = result.fetchall()
-
     agents = [
         AgentReportEntry(
             agent_id=row.agent_id,
@@ -250,31 +249,22 @@ async def eval_report(db: AsyncSession = Depends(get_db)) -> EvalReportOut:
         )
         for row in rows
     ]
-
-    return EvalReportOut(
-        generated_at=datetime.now(timezone.utc),
-        total_evaluated=total_evaluated,
-        agents=agents,
-    )
+    return EvalReportOut(generated_at=datetime.now(timezone.utc), total_evaluated=total_evaluated, agents=agents)
 
 
 @app.get("/eval/compare", response_model=EvalCompareOut)
 async def eval_compare(
-    agent_a: str = Query(...),
-    agent_b: str = Query(...),
-    db: AsyncSession = Depends(get_db),
+    agent_a: str = Query(...), agent_b: str = Query(...), db: AsyncSession = Depends(get_db),
 ) -> EvalCompareOut:
     async def agent_averages(aid: str) -> dict[str, float]:
         stmt = text(
             """
-            SELECT
-                AVG(er.overall_score)                            AS overall,
-                AVG(CASE WHEN es.dimension = 'latency'  THEN es.score END) AS latency,
-                AVG(CASE WHEN es.dimension = 'length'   THEN es.score END) AS length,
-                AVG(CASE WHEN es.dimension = 'feedback' THEN es.score END) AS feedback,
-                AVG(CASE WHEN es.dimension = 'error'    THEN es.score END) AS error
-            FROM eval_runs er
-            JOIN eval_scores es ON es.eval_run_id = er.id
+            SELECT AVG(er.overall_score) AS overall,
+                   AVG(CASE WHEN es.dimension='latency'  THEN es.score END) AS latency,
+                   AVG(CASE WHEN es.dimension='length'   THEN es.score END) AS length,
+                   AVG(CASE WHEN es.dimension='feedback' THEN es.score END) AS feedback,
+                   AVG(CASE WHEN es.dimension='error'    THEN es.score END) AS error
+            FROM eval_runs er JOIN eval_scores es ON es.eval_run_id = er.id
             WHERE er.agent_id = :agent_id
             """
         )
@@ -282,37 +272,20 @@ async def eval_compare(
         row = result.fetchone()
         if row is None or row.overall is None:
             return {"overall": 0.0, "latency": 0.0, "length": 0.0, "feedback": 0.0, "error": 0.0}
-        return {
-            "overall":  round(float(row.overall  or 0), 4),
-            "latency":  round(float(row.latency  or 0), 4),
-            "length":   round(float(row.length   or 0), 4),
-            "feedback": round(float(row.feedback or 0), 4),
-            "error":    round(float(row.error    or 0), 4),
-        }
+        return {k: round(float(getattr(row, k) or 0), 4) for k in ["overall", "latency", "length", "feedback", "error"]}
 
-    avgs_a = await agent_averages(agent_a)
-    avgs_b = await agent_averages(agent_b)
-
-    comparison: dict[str, ComparisonEntry] = {
-        dim: ComparisonEntry(
-            agent_a=avgs_a[dim],
-            agent_b=avgs_b[dim],
-            delta=round(avgs_a[dim] - avgs_b[dim], 4),
-        )
+    avgs_a, avgs_b = await agent_averages(agent_a), await agent_averages(agent_b)
+    comparison = {
+        dim: ComparisonEntry(agent_a=avgs_a[dim], agent_b=avgs_b[dim], delta=round(avgs_a[dim] - avgs_b[dim], 4))
         for dim in ["overall", "latency", "length", "feedback", "error"]
     }
-
-    delta_overall = avgs_a["overall"] - avgs_b["overall"]
-    winner = "tied" if abs(delta_overall) <= 0.02 else (agent_a if delta_overall > 0 else agent_b)
-
+    d = avgs_a["overall"] - avgs_b["overall"]
+    winner = "tied" if abs(d) <= 0.02 else (agent_a if d > 0 else agent_b)
     return EvalCompareOut(agent_a=agent_a, agent_b=agent_b, winner=winner, comparison=comparison)
 
 
 @app.post("/eval/run", response_model=EvalRunResponse)
-async def eval_run(
-    body: EvalRunRequest,
-    db: AsyncSession = Depends(get_db),
-) -> EvalRunResponse:
+async def eval_run(body: EvalRunRequest, db: AsyncSession = Depends(get_db)) -> EvalRunResponse:
     if body.trace_id:
         try:
             await run_eval_for_trace(body.trace_id, db)
@@ -322,27 +295,17 @@ async def eval_run(
         except Exception as exc:
             logger.error("Manual eval failed: %s", exc)
             raise HTTPException(status_code=500, detail="Evaluation failed")
-
     runs = await run_eval_pending(db)
     count = len(runs)
-    return EvalRunResponse(
-        evaluated=count,
-        skipped=0,
-        message=f"Evaluated {count} pending trace{'s' if count != 1 else ''}",
-    )
+    return EvalRunResponse(evaluated=count, skipped=0, message=f"Evaluated {count} pending trace{'s' if count != 1 else ''}")
 
 
 # ─── Phase 4 sandbox endpoints ─────────────────────────────────────────────────
 
 @app.post("/sandbox", response_model=SandboxOut)
-async def sandbox_create(
-    body: SandboxCreateRequest,
-    db: AsyncSession = Depends(get_db),
-) -> SandboxOut:
-    """Create a new sandbox copy of a production agent."""
+async def sandbox_create(body: SandboxCreateRequest, db: AsyncSession = Depends(get_db)) -> SandboxOut:
     if body.production_agent_id not in REGISTRY:
         raise HTTPException(status_code=400, detail=f"Unknown agent: {body.production_agent_id}")
-
     try:
         sandbox = await create_sandbox(
             name=body.name,
@@ -352,16 +315,10 @@ async def sandbox_create(
         )
     except NameError as exc:
         raise HTTPException(status_code=409, detail=str(exc))
-
     return SandboxOut(
-        sandbox_id=str(sandbox.id),
-        name=sandbox.name,
-        production_agent_id=sandbox.production_agent_id,
-        status=sandbox.status,
-        config=sandbox.config,
-        trace_count=0,
-        avg_overall_score=None,
-        created_at=sandbox.created_at,
+        sandbox_id=str(sandbox.id), name=sandbox.name,
+        production_agent_id=sandbox.production_agent_id, status=sandbox.status,
+        config=sandbox.config, trace_count=0, avg_overall_score=None, created_at=sandbox.created_at,
     )
 
 
@@ -371,154 +328,177 @@ async def sandbox_list(
     production_agent_id: str | None = Query(default=None),
     db: AsyncSession = Depends(get_db),
 ) -> list[SandboxOut]:
-    """List all sandbox agents with trace count and avg score (SQL aggregates)."""
-    # Use ORM query for filters (avoids asyncpg NULL type inference issue)
     sa_stmt = select(SandboxAgent).order_by(SandboxAgent.created_at.desc())
     if status:
         sa_stmt = sa_stmt.where(SandboxAgent.status == status)
     if production_agent_id:
         sa_stmt = sa_stmt.where(SandboxAgent.production_agent_id == production_agent_id)
-
     sa_result = await db.execute(sa_stmt)
     sandboxes = sa_result.scalars().all()
 
     output = []
     for sandbox in sandboxes:
-        # SQL aggregate per sandbox
         agg = await db.execute(
-            text(
-                """
-                SELECT COUNT(DISTINCT st.id) AS trace_count,
-                       AVG(ses.overall_score) AS avg_overall_score
-                FROM sandbox_traces st
-                LEFT JOIN sandbox_eval_scores ses ON ses.sandbox_id = st.sandbox_id
-                WHERE st.sandbox_id = :sid
-                """
-            ),
+            text("SELECT COUNT(DISTINCT st.id) AS trace_count, AVG(ses.overall_score) AS avg_overall_score FROM sandbox_traces st LEFT JOIN sandbox_eval_scores ses ON ses.sandbox_id = st.sandbox_id WHERE st.sandbox_id = :sid"),
             {"sid": str(sandbox.id)},
         )
         row = agg.fetchone()
-        output.append(
-            SandboxOut(
-                sandbox_id=str(sandbox.id),
-                name=sandbox.name,
-                production_agent_id=sandbox.production_agent_id,
-                status=sandbox.status,
-                config=sandbox.config or {},
-                trace_count=row.trace_count or 0 if row else 0,
-                avg_overall_score=round(float(row.avg_overall_score), 4) if row and row.avg_overall_score else None,
-                created_at=sandbox.created_at,
-            )
-        )
+        output.append(SandboxOut(
+            sandbox_id=str(sandbox.id), name=sandbox.name,
+            production_agent_id=sandbox.production_agent_id, status=sandbox.status,
+            config=sandbox.config or {}, trace_count=row.trace_count or 0 if row else 0,
+            avg_overall_score=round(float(row.avg_overall_score), 4) if row and row.avg_overall_score else None,
+            created_at=sandbox.created_at,
+        ))
     return output
 
 
 @app.get("/sandbox/{sandbox_id}", response_model=SandboxDetailOut)
-async def sandbox_detail(
-    sandbox_id: str,
-    db: AsyncSession = Depends(get_db),
-) -> SandboxDetailOut:
-    """Full details for one sandbox including per-dimension averages."""
+async def sandbox_detail(sandbox_id: str, db: AsyncSession = Depends(get_db)) -> SandboxDetailOut:
     try:
         sid = uuid.UUID(sandbox_id)
     except ValueError:
         raise HTTPException(status_code=400, detail="Invalid sandbox_id format")
-
     result = await db.execute(select(SandboxAgent).where(SandboxAgent.id == sid))
     sandbox = result.scalar_one_or_none()
     if sandbox is None:
         raise HTTPException(status_code=404, detail="Sandbox not found")
-
-    # Trace count + overall avg
-    agg_stmt = text(
-        """
-        SELECT
-            COUNT(DISTINCT st.id)  AS trace_count,
-            AVG(ses.overall_score) AS avg_overall_score,
-            AVG(CASE WHEN ses.dimension = 'latency'  THEN ses.score END) AS latency_avg,
-            AVG(CASE WHEN ses.dimension = 'length'   THEN ses.score END) AS length_avg,
-            AVG(CASE WHEN ses.dimension = 'feedback' THEN ses.score END) AS feedback_avg,
-            AVG(CASE WHEN ses.dimension = 'error'    THEN ses.score END) AS error_avg
-        FROM sandbox_traces st
-        LEFT JOIN sandbox_eval_scores ses ON ses.sandbox_trace_id = st.id
-        WHERE st.sandbox_id = :sid
-        """
+    agg_result = await db.execute(
+        text("SELECT COUNT(DISTINCT st.id) AS trace_count, AVG(ses.overall_score) AS avg_overall_score, AVG(CASE WHEN ses.dimension='latency' THEN ses.score END) AS latency_avg, AVG(CASE WHEN ses.dimension='length' THEN ses.score END) AS length_avg, AVG(CASE WHEN ses.dimension='feedback' THEN ses.score END) AS feedback_avg, AVG(CASE WHEN ses.dimension='error' THEN ses.score END) AS error_avg FROM sandbox_traces st LEFT JOIN sandbox_eval_scores ses ON ses.sandbox_trace_id = st.id WHERE st.sandbox_id = :sid"),
+        {"sid": str(sid)},
     )
-    agg_result = await db.execute(agg_stmt, {"sid": str(sid)})
     agg = agg_result.fetchone()
-
-    def _r(val) -> float:
-        return round(float(val), 4) if val is not None else 0.0
-
-    dimension_averages = {
-        "latency":  _r(agg.latency_avg),
-        "length":   _r(agg.length_avg),
-        "feedback": _r(agg.feedback_avg),
-        "error":    _r(agg.error_avg),
-    } if agg else None
-
+    def _r(v): return round(float(v), 4) if v is not None else 0.0
     return SandboxDetailOut(
-        sandbox_id=str(sandbox.id),
-        name=sandbox.name,
-        production_agent_id=sandbox.production_agent_id,
-        status=sandbox.status,
-        config=sandbox.config or {},
-        trace_count=agg.trace_count or 0 if agg else 0,
+        sandbox_id=str(sandbox.id), name=sandbox.name,
+        production_agent_id=sandbox.production_agent_id, status=sandbox.status,
+        config=sandbox.config or {}, trace_count=agg.trace_count or 0 if agg else 0,
         avg_overall_score=round(float(agg.avg_overall_score), 4) if agg and agg.avg_overall_score else None,
-        dimension_averages=dimension_averages,
+        dimension_averages={"latency": _r(agg.latency_avg), "length": _r(agg.length_avg), "feedback": _r(agg.feedback_avg), "error": _r(agg.error_avg)} if agg else None,
         created_at=sandbox.created_at,
     )
 
 
 @app.get("/sandbox/{sandbox_id}/compare", response_model=SandboxCompareOut)
-async def sandbox_compare(
-    sandbox_id: str,
-    db: AsyncSession = Depends(get_db),
-) -> SandboxCompareOut:
-    """Compare sandbox eval scores vs its production baseline."""
+async def sandbox_compare(sandbox_id: str, db: AsyncSession = Depends(get_db)) -> SandboxCompareOut:
     try:
         data = await get_sandbox_comparison(sandbox_id, db)
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc))
-
-    comparison = {
-        dim: ComparisonDimension(**vals)
-        for dim, vals in data["comparison"].items()
-    }
-
     return SandboxCompareOut(
-        sandbox_id=data["sandbox_id"],
-        sandbox_name=data["sandbox_name"],
-        production_agent_id=data["production_agent_id"],
-        verdict=data["verdict"],
-        min_traces_required=data["min_traces_required"],
-        sandbox_trace_count=data["sandbox_trace_count"],
-        comparison=comparison,
+        sandbox_id=data["sandbox_id"], sandbox_name=data["sandbox_name"],
+        production_agent_id=data["production_agent_id"], verdict=data["verdict"],
+        min_traces_required=data["min_traces_required"], sandbox_trace_count=data["sandbox_trace_count"],
+        comparison={dim: ComparisonDimension(**vals) for dim, vals in data["comparison"].items()},
     )
 
 
 @app.delete("/sandbox/{sandbox_id}", response_model=SandboxDeleteOut)
 async def sandbox_delete(
-    sandbox_id: str,
-    action: str = Query(default="suspend"),
-    db: AsyncSession = Depends(get_db),
+    sandbox_id: str, action: str = Query(default="suspend"), db: AsyncSession = Depends(get_db),
 ) -> SandboxDeleteOut:
-    """Suspend or soft-delete a sandbox. action=suspend|delete (default: suspend)."""
     if action not in ("suspend", "delete"):
         raise HTTPException(status_code=400, detail="action must be 'suspend' or 'delete'")
-
     try:
-        if action == "suspend":
-            sandbox = await suspend_sandbox(sandbox_id, db)
-            message = "Sandbox suspended. Shadow execution paused."
-        else:
-            sandbox = await delete_sandbox(sandbox_id, db)
-            message = "Sandbox soft-deleted. Data retained for audit trail."
+        sandbox = await (suspend_sandbox if action == "suspend" else delete_sandbox)(sandbox_id, db)
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc))
-
     return SandboxDeleteOut(
-        sandbox_id=str(sandbox.id),
-        status=sandbox.status,
-        message=message,
+        sandbox_id=str(sandbox.id), status=sandbox.status,
+        message="Sandbox suspended. Shadow execution paused." if action == "suspend"
+                else "Sandbox soft-deleted. Data retained for audit trail.",
+    )
+
+
+# ─── Phase 5 optimizer endpoints ──────────────────────────────────────────────
+
+def _run_to_summary(run: OptimizerRun) -> OptimizerRunSummary:
+    return OptimizerRunSummary(
+        run_id=str(run.id),
+        status=run.status,
+        triggered_by=run.triggered_by,
+        findings_count=len(run.findings or []),
+        proposals_count=len(run.proposals or []),
+        sandboxes_created=[str(s) for s in (run.sandboxes_created or [])],
+        error=run.error,
+        started_at=run.started_at,
+        completed_at=run.completed_at,
+    )
+
+
+@app.post("/optimizer/run", response_model=OptimizerRunSummary)
+async def optimizer_run(db: AsyncSession = Depends(get_db)) -> OptimizerRunSummary:
+    """Manually trigger one optimizer cycle. Runs synchronously — returns when done."""
+    run = await run_optimizer_cycle(db, triggered_by="manual")
+    return _run_to_summary(run)
+
+
+@app.get("/optimizer/runs", response_model=list[OptimizerRunSummary])
+async def optimizer_runs_list(
+    limit: int = Query(default=20, ge=1, le=100),
+    status: str | None = Query(default=None),
+    db: AsyncSession = Depends(get_db),
+) -> list[OptimizerRunSummary]:
+    """List all past optimizer runs."""
+    stmt = select(OptimizerRun).order_by(OptimizerRun.started_at.desc()).limit(limit)
+    if status:
+        stmt = stmt.where(OptimizerRun.status == status)
+    result = await db.execute(stmt)
+    runs = result.scalars().all()
+    return [_run_to_summary(r) for r in runs]
+
+
+@app.get("/optimizer/runs/{run_id}", response_model=OptimizerRunDetail)
+async def optimizer_run_detail(run_id: str, db: AsyncSession = Depends(get_db)) -> OptimizerRunDetail:
+    """Full detail of one optimizer run including findings and proposals."""
+    try:
+        rid = uuid.UUID(run_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid run_id format")
+    result = await db.execute(select(OptimizerRun).where(OptimizerRun.id == rid))
+    run = result.scalar_one_or_none()
+    if run is None:
+        raise HTTPException(status_code=404, detail="Optimizer run not found")
+
+    findings = [FailurePatternOut(**f) for f in (run.findings or [])]
+    proposals = [ProposalOut(**p) for p in (run.proposals or [])]
+
+    return OptimizerRunDetail(
+        run_id=str(run.id),
+        status=run.status,
+        triggered_by=run.triggered_by,
+        agents_analyzed=run.agents_analyzed or [],
+        findings_count=len(findings),
+        proposals_count=len(proposals),
+        sandboxes_created=[str(s) for s in (run.sandboxes_created or [])],
+        error=run.error,
+        started_at=run.started_at,
+        completed_at=run.completed_at,
+        findings=findings,
+        proposals=proposals,
+    )
+
+
+@app.get("/optimizer/schedule", response_model=ScheduleOut)
+async def optimizer_schedule(db: AsyncSession = Depends(get_db)) -> ScheduleOut:
+    """Shows next scheduled run time and last run status."""
+    next_run = None
+    try:
+        job = scheduler.get_job("nightly_optimizer")
+        if job:
+            next_run = job.next_run_time
+    except Exception:
+        pass
+
+    result = await db.execute(
+        select(OptimizerRun)
+        .order_by(OptimizerRun.started_at.desc())
+        .limit(1)
+    )
+    last = result.scalar_one_or_none()
+
+    return ScheduleOut(
+        next_run=next_run,
+        last_run=_run_to_summary(last) if last else None,
+        schedule="daily at 02:00 UTC",
     )

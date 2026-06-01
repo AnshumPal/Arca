@@ -125,3 +125,24 @@ class SandboxEvalScore(Base):
     evaluated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )
+
+
+# ─── Phase 5: Optimizer model ─────────────────────────────────────────────────
+
+class OptimizerRun(Base):
+    __tablename__ = "optimizer_runs"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    status: Mapped[str] = mapped_column(String, nullable=False, default="running")
+    triggered_by: Mapped[str] = mapped_column(String, nullable=False, default="schedule")
+    agents_analyzed: Mapped[list] = mapped_column(JSONB, nullable=False, default=list)
+    findings: Mapped[list] = mapped_column(JSONB, nullable=False, default=list)
+    proposals: Mapped[list] = mapped_column(JSONB, nullable=False, default=list)
+    sandboxes_created: Mapped[list] = mapped_column(JSONB, nullable=False, default=list)
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    started_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+    completed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )

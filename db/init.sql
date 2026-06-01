@@ -89,3 +89,21 @@ CREATE INDEX IF NOT EXISTS sandbox_agents_status_idx  ON sandbox_agents(status);
 CREATE INDEX IF NOT EXISTS sandbox_traces_sandbox_idx ON sandbox_traces(sandbox_id);
 CREATE INDEX IF NOT EXISTS sandbox_traces_created_idx ON sandbox_traces(created_at DESC);
 CREATE INDEX IF NOT EXISTS sandbox_eval_sandbox_idx   ON sandbox_eval_scores(sandbox_id);
+
+-- ─── Phase 5: Optimizer table ─────────────────────────────────────────────────
+
+CREATE TABLE IF NOT EXISTS optimizer_runs (
+    id                UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+    status            TEXT        NOT NULL DEFAULT 'running',
+    triggered_by      TEXT        NOT NULL DEFAULT 'schedule',
+    agents_analyzed   JSONB       NOT NULL DEFAULT '[]',
+    findings          JSONB       NOT NULL DEFAULT '[]',
+    proposals         JSONB       NOT NULL DEFAULT '[]',
+    sandboxes_created JSONB       NOT NULL DEFAULT '[]',
+    error             TEXT,
+    started_at        TIMESTAMPTZ NOT NULL DEFAULT now(),
+    completed_at      TIMESTAMPTZ
+);
+
+CREATE INDEX IF NOT EXISTS optimizer_runs_status_idx  ON optimizer_runs(status);
+CREATE INDEX IF NOT EXISTS optimizer_runs_started_idx ON optimizer_runs(started_at DESC);

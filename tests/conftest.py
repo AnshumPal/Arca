@@ -13,6 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 
 import app.eval_runner as eval_runner_module
 import app.sandbox as sandbox_module
+import app.scheduler as scheduler_module
 from app.database import Base, get_db
 from app.main import app
 
@@ -28,6 +29,7 @@ TestSessionLocal = async_sessionmaker(test_engine, expire_on_commit=False)
 # by the test session (instead of connecting to the production Neon DB).
 eval_runner_module.AsyncSessionLocal = TestSessionLocal
 sandbox_module.AsyncSessionLocal = TestSessionLocal
+scheduler_module.AsyncSessionLocal = TestSessionLocal
 
 
 @pytest_asyncio.fixture(scope="session", loop_scope="session", autouse=True)
