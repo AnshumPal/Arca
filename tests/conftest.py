@@ -2,13 +2,6 @@
 conftest.py
 Shared fixtures for all test modules.
 Session-scoped so the whole test run shares one event loop + one DB connection.
-
-URL priority:
-  1. TEST_DATABASE_URL env var  (explicit override — used in CI)
-  2. postgresql+asyncpg://arca:arca@localhost:5432/arca  (local Docker default)
-
-Do NOT fall back to settings.async_database_url here — that points to the
-production Neon database and drop_all at teardown would wipe production tables.
 """
 
 import os
@@ -19,6 +12,7 @@ from httpx import ASGITransport, AsyncClient
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 import app.eval_runner as eval_runner_module
+import app.sandbox as sandbox_module
 from app.database import Base, get_db
 from app.main import app
 
@@ -30,9 +24,10 @@ TEST_DATABASE_URL = os.environ.get(
 test_engine = create_async_engine(TEST_DATABASE_URL, echo=False)
 TestSessionLocal = async_sessionmaker(test_engine, expire_on_commit=False)
 
-# Redirect background eval tasks to the test database so they can find
-# traces written by the test session (instead of connecting to production Neon).
+# Redirect background tasks to the test database so they find traces written
+# by the test session (instead of connecting to the production Neon DB).
 eval_runner_module.AsyncSessionLocal = TestSessionLocal
+sandbox_module.AsyncSessionLocal = TestSessionLocal
 
 
 @pytest_asyncio.fixture(scope="session", loop_scope="session", autouse=True)

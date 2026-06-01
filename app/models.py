@@ -62,3 +62,66 @@ class EvalScore(Base):
     )
 
     eval_run: Mapped["EvalRun"] = relationship("EvalRun", back_populates="scores")
+
+
+# ─── Phase 4: Sandbox models ──────────────────────────────────────────────────
+
+class SandboxAgent(Base):
+    __tablename__ = "sandbox_agents"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    name: Mapped[str] = mapped_column(String, nullable=False, unique=True)
+    production_agent_id: Mapped[str] = mapped_column(String, nullable=False)
+    status: Mapped[str] = mapped_column(String, nullable=False, default="active")
+    config: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False
+    )
+
+    traces: Mapped[list["SandboxTrace"]] = relationship(
+        "SandboxTrace", back_populates="sandbox", cascade="all, delete-orphan"
+    )
+
+
+class SandboxTrace(Base):
+    __tablename__ = "sandbox_traces"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    sandbox_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("sandbox_agents.id", ondelete="CASCADE"), nullable=False
+    )
+    production_agent_id: Mapped[str] = mapped_column(String, nullable=False)
+    session_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    input: Mapped[str] = mapped_column(Text, nullable=False)
+    output: Mapped[str | None] = mapped_column(Text, nullable=True)
+    prompt_used: Mapped[str | None] = mapped_column(Text, nullable=True)
+    tools_used: Mapped[list] = mapped_column(JSONB, default=list)
+    latency_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+
+    sandbox: Mapped["SandboxAgent"] = relationship("SandboxAgent", back_populates="traces")
+
+
+class SandboxEvalScore(Base):
+    __tablename__ = "sandbox_eval_scores"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    sandbox_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("sandbox_agents.id", ondelete="CASCADE"), nullable=False
+    )
+    sandbox_trace_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("sandbox_traces.id", ondelete="CASCADE"), nullable=False
+    )
+    dimension: Mapped[str] = mapped_column(String, nullable=False)
+    score: Mapped[float] = mapped_column(Float, nullable=False)
+    reasoning: Mapped[str | None] = mapped_column(Text, nullable=True)
+    overall_score: Mapped[float] = mapped_column(Float, nullable=False)
+    evaluated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
