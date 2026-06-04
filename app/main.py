@@ -5,6 +5,7 @@ from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 
 from fastapi import BackgroundTasks, Depends, FastAPI, HTTPException, Query
+from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -104,7 +105,21 @@ async def lifespan(app: FastAPI):
     logger.info("Arca API shutting down")
 
 
-app = FastAPI(title="Arca", version="0.6.0", lifespan=lifespan)
+app = FastAPI(title="Arca", version="0.7.0", lifespan=lifespan)
+
+# ─── CORS — allow frontend (local dev + Vercel deploy) ────────────────────────
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[
+        "http://localhost:3000",
+        "https://arca-frontend.vercel.app",
+        "https://arca-dashboard.vercel.app",
+    ],
+    allow_origin_regex=r"https://.*\.vercel\.app",  # any vercel preview deploy
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 
 # ─── Phase 1 endpoints ────────────────────────────────────────────────────────
