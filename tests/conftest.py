@@ -11,6 +11,7 @@ import pytest_asyncio
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
+import app.database as database_module
 import app.eval_runner as eval_runner_module
 import app.sandbox as sandbox_module
 import app.scheduler as scheduler_module
@@ -30,6 +31,8 @@ TestSessionLocal = async_sessionmaker(test_engine, expire_on_commit=False)
 eval_runner_module.AsyncSessionLocal = TestSessionLocal
 sandbox_module.AsyncSessionLocal = TestSessionLocal
 scheduler_module.AsyncSessionLocal = TestSessionLocal
+# Patch the canonical source too — agents/base.py does a lazy import from here
+database_module.AsyncSessionLocal = TestSessionLocal
 
 
 @pytest_asyncio.fixture(scope="session", loop_scope="session", autouse=True)

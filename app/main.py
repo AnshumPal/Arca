@@ -24,8 +24,38 @@ from app.eval_schemas import (
     EvalRunResponse,
     EvalScoreOut,
 )
-from app.models import EvalRun, EvalScore, OptimizerRun, SandboxAgent, SandboxEvalScore, SandboxTrace
+from app.models import (
+    AgentVersion,
+    EvalRun,
+    EvalScore,
+    OptimizerRun,
+    Promotion,
+    Rollback,
+    SandboxAgent,
+    SandboxEvalScore,
+    SandboxTrace,
+)
 from app.optimizer import run_optimizer_cycle
+from app.promoter import (
+    PromoterError,
+    approve_promotion,
+    execute_rollback,
+    reject_promotion,
+    request_promotion,
+)
+from app.promotion_schemas import (
+    AgentVersionOut,
+    ApproveOut,
+    GateCheckOut,
+    GateResultOut,
+    PromotionOut,
+    PromotionSummary,
+    RejectOut,
+    RejectRequest,
+    RollbackOut,
+    RollbackRequest,
+)
+from app import version_manager
 from app.optimizer_schemas import (
     FailurePatternOut,
     OptimizerRunDetail,
@@ -74,7 +104,7 @@ async def lifespan(app: FastAPI):
     logger.info("Arca API shutting down")
 
 
-app = FastAPI(title="Arca", version="0.5.0", lifespan=lifespan)
+app = FastAPI(title="Arca", version="0.6.0", lifespan=lifespan)
 
 
 # ─── Phase 1 endpoints ────────────────────────────────────────────────────────
@@ -502,3 +532,197 @@ async def optimizer_schedule(db: AsyncSession = Depends(get_db)) -> ScheduleOut:
         last_run=_run_to_summary(last) if last else None,
         schedule="daily at 02:00 UTC",
     )
+
+
+# ─── Phase 6 promotion gate + rollback endpoints ──────────────────────────────
+
+def _promotion_to_out(p: Promotion) -> PromotionOut:
+    """Build PromotionOut response with full gate detail."""
+    gate_results = p.gate_results or {"passed": False, "summary": "", "checks": []}
+    return PromotionOut(
+        promotion_id=str(p.id),
+        sandbox_id=str(p.sandbox_id),
+        agent_id=p.agent_id,
+        status=p.status,
+        gate_passed=p.gate_passed,
+        gate_results=GateResultOut(
+            passed=gate_results.get("passed", False),
+            summary=gate_results.get("summary", ""),
+            checks=[GateCheckOut(**c) for c in gate_results.get("checks", [])],
+        ),
+        requested_at=p.requested_at,
+        decided_at=p.decided_at,
+        decided_by=p.decided_by,
+        rejection_reason=p.rejection_reason,
+        version_created=p.version_created,
+    )
+
+
+@app.post("/promote/{sandbox_id}", response_model=PromotionOut)
+async def promote_sandbox(
+    sandbox_id: str,
+    db: AsyncSession = Depends(get_db),
+) -> PromotionOut:
+    """Request promotion for a sandbox. Runs gate automatically — does NOT block on gate failure."""
+    try:
+        promotion = await request_promotion(sandbox_id, db)
+    except PromoterError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc))
+    return _promotion_to_out(promotion)
+
+
+@app.get("/promote", response_model=list[PromotionSummary])
+async def promote_list(
+    status: str | None = Query(default=None),
+    agent_id: str | None = Query(default=None),
+    db: AsyncSession = Depends(get_db),
+) -> list[PromotionSummary]:
+    """List all promotion records."""
+    stmt = select(Promotion).order_by(Promotion.requested_at.desc())
+    if status:
+        stmt = stmt.where(Promotion.status == status)
+    if agent_id:
+        stmt = stmt.where(Promotion.agent_id == agent_id)
+    result = await db.execute(stmt)
+    rows = result.scalars().all()
+    return [
+        PromotionSummary(
+            promotion_id=str(p.id),
+            sandbox_id=str(p.sandbox_id),
+            agent_id=p.agent_id,
+            status=p.status,
+            gate_passed=p.gate_passed,
+            requested_at=p.requested_at,
+            decided_at=p.decided_at,
+            version_created=p.version_created,
+        )
+        for p in rows
+    ]
+
+
+@app.get("/promote/{promotion_id}", response_model=PromotionOut)
+async def promote_detail(
+    promotion_id: str,
+    db: AsyncSession = Depends(get_db),
+) -> PromotionOut:
+    """Full detail of one promotion including all gate check results."""
+    try:
+        pid = uuid.UUID(promotion_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid promotion_id format")
+
+    result = await db.execute(select(Promotion).where(Promotion.id == pid))
+    promotion = result.scalar_one_or_none()
+    if promotion is None:
+        raise HTTPException(status_code=404, detail="Promotion not found")
+    return _promotion_to_out(promotion)
+
+
+@app.post("/promote/{promotion_id}/approve", response_model=ApproveOut)
+async def promote_approve(
+    promotion_id: str,
+    db: AsyncSession = Depends(get_db),
+) -> ApproveOut:
+    """Human approves promotion. Agent goes live on new prompt within 30 seconds."""
+    try:
+        promotion = await approve_promotion(promotion_id, db)
+    except PromoterError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc))
+    return ApproveOut(
+        promotion_id=str(promotion.id),
+        status=promotion.status,
+        agent_id=promotion.agent_id,
+        version_created=promotion.version_created or 0,
+        decided_at=promotion.decided_at or datetime.now(timezone.utc),
+        message=f"{promotion.agent_id} promoted to version {promotion.version_created}. Live within 30 seconds.",
+    )
+
+
+@app.post("/promote/{promotion_id}/reject", response_model=RejectOut)
+async def promote_reject(
+    promotion_id: str,
+    body: RejectRequest,
+    db: AsyncSession = Depends(get_db),
+) -> RejectOut:
+    """Human rejects promotion. Sandbox stays active."""
+    try:
+        promotion = await reject_promotion(promotion_id, body.reason, db)
+    except PromoterError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc))
+    return RejectOut(
+        promotion_id=str(promotion.id),
+        status=promotion.status,
+        agent_id=promotion.agent_id,
+        rejection_reason=promotion.rejection_reason or "",
+        decided_at=promotion.decided_at or datetime.now(timezone.utc),
+    )
+
+
+@app.get("/agents/{agent_id}/versions", response_model=list[AgentVersionOut])
+async def agent_versions(
+    agent_id: str,
+    db: AsyncSession = Depends(get_db),
+) -> list[AgentVersionOut]:
+    """Full version history for a production agent."""
+    if agent_id not in REGISTRY:
+        raise HTTPException(status_code=404, detail=f"Unknown agent: {agent_id}")
+    versions = await version_manager.get_version_history(agent_id, db)
+    return [
+        AgentVersionOut(
+            version=v.version,
+            is_current=v.is_current,
+            system_prompt=v.system_prompt,
+            promoted_from=str(v.promoted_from) if v.promoted_from else None,
+            created_at=v.created_at,
+        )
+        for v in versions
+    ]
+
+
+@app.post("/agents/{agent_id}/rollback", response_model=RollbackOut)
+async def agent_rollback(
+    agent_id: str,
+    body: RollbackRequest,
+    db: AsyncSession = Depends(get_db),
+) -> RollbackOut:
+    """Roll back a production agent to a previous version."""
+    if agent_id not in REGISTRY:
+        raise HTTPException(status_code=404, detail=f"Unknown agent: {agent_id}")
+    try:
+        rb = await execute_rollback(agent_id, body.to_version, body.reason, db)
+    except PromoterError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc))
+    return RollbackOut(
+        rollback_id=str(rb.id),
+        agent_id=rb.agent_id,
+        from_version=rb.from_version,
+        to_version=rb.to_version,
+        reason=rb.reason,
+        rolled_back_at=rb.rolled_back_at,
+        message=f"{agent_id} rolled back to version {rb.to_version}. Live within 30 seconds.",
+    )
+
+
+@app.get("/rollbacks", response_model=list[RollbackOut])
+async def rollbacks_list(
+    agent_id: str | None = Query(default=None),
+    db: AsyncSession = Depends(get_db),
+) -> list[RollbackOut]:
+    """List all rollback events."""
+    stmt = select(Rollback).order_by(Rollback.rolled_back_at.desc())
+    if agent_id:
+        stmt = stmt.where(Rollback.agent_id == agent_id)
+    result = await db.execute(stmt)
+    rows = result.scalars().all()
+    return [
+        RollbackOut(
+            rollback_id=str(rb.id),
+            agent_id=rb.agent_id,
+            from_version=rb.from_version,
+            to_version=rb.to_version,
+            reason=rb.reason,
+            rolled_back_at=rb.rolled_back_at,
+            message=f"{rb.agent_id} rolled back from v{rb.from_version} to v{rb.to_version}",
+        )
+        for rb in rows
+    ]

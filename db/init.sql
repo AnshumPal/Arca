@@ -107,3 +107,46 @@ CREATE TABLE IF NOT EXISTS optimizer_runs (
 
 CREATE INDEX IF NOT EXISTS optimizer_runs_status_idx  ON optimizer_runs(status);
 CREATE INDEX IF NOT EXISTS optimizer_runs_started_idx ON optimizer_runs(started_at DESC);
+
+-- ─── Phase 6: Promotion gate + rollback tables ────────────────────────────────
+
+CREATE TABLE IF NOT EXISTS agent_versions (
+    id            UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+    agent_id      TEXT        NOT NULL,
+    version       INTEGER     NOT NULL,
+    system_prompt TEXT        NOT NULL,
+    promoted_from UUID,
+    is_current    BOOLEAN     NOT NULL DEFAULT FALSE,
+    created_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
+    UNIQUE(agent_id, version)
+);
+
+CREATE TABLE IF NOT EXISTS promotions (
+    id               UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+    sandbox_id       UUID        NOT NULL REFERENCES sandbox_agents(id),
+    agent_id         TEXT        NOT NULL,
+    status           TEXT        NOT NULL DEFAULT 'pending',
+    gate_passed      BOOLEAN,
+    gate_results     JSONB       NOT NULL DEFAULT '{}',
+    requested_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
+    decided_at       TIMESTAMPTZ,
+    decided_by       TEXT,
+    rejection_reason TEXT,
+    version_created  INTEGER
+);
+
+CREATE TABLE IF NOT EXISTS rollbacks (
+    id             UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+    agent_id       TEXT        NOT NULL,
+    from_version   INTEGER     NOT NULL,
+    to_version     INTEGER     NOT NULL,
+    reason         TEXT,
+    rolled_back_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS agent_versions_agent_idx   ON agent_versions(agent_id);
+CREATE INDEX IF NOT EXISTS agent_versions_current_idx ON agent_versions(agent_id, is_current);
+CREATE INDEX IF NOT EXISTS promotions_sandbox_idx     ON promotions(sandbox_id);
+CREATE INDEX IF NOT EXISTS promotions_agent_idx       ON promotions(agent_id);
+CREATE INDEX IF NOT EXISTS promotions_status_idx      ON promotions(status);
+CREATE INDEX IF NOT EXISTS rollbacks_agent_idx        ON rollbacks(agent_id);
