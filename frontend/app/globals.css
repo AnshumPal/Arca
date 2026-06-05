@@ -1,0 +1,89 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  color-scheme: dark;
+  /* Editorial palette inspired by premium product design */
+  --bg:       #050505;   /* near-black */
+  --surface:  #0d0d0d;   /* card surface */
+  --border:   #1a1a1a;
+  --ink:      #f5f1ea;   /* warm off-white text */
+  --muted:    #8a8378;
+  --copper:   #c87f4a;   /* primary accent */
+  --copper-d: #a25d2c;
+  --sage:     #6d7d5e;   /* secondary accent */
+}
+
+html,
+body {
+  background: var(--bg);
+  color: var(--ink);
+  font-family: var(--font-inter), ui-sans-serif, system-ui, -apple-system, sans-serif;
+  font-feature-settings: "ss01", "cv11";
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+.font-serif {
+  font-family: var(--font-fraunces), "Times New Roman", serif;
+  letter-spacing: -0.02em;
+}
+
+* {
+  scrollbar-width: thin;
+  scrollbar-color: #2a2a2a #050505;
+}
+::-webkit-scrollbar { width: 8px; height: 8px; }
+::-webkit-scrollbar-track { background: var(--bg); }
+::-webkit-scrollbar-thumb { background: #2a2a2a; border-radius: 4px; }
+
+@layer components {
+  .card {
+    @apply rounded-2xl border bg-[#0d0d0d] p-6 shadow-2xl;
+    border-color: var(--border);
+  }
+  .card-image {
+    @apply rounded-2xl overflow-hidden border;
+    border-color: var(--border);
+  }
+  .btn {
+    @apply inline-flex items-center justify-center gap-2 rounded-full px-5 py-2.5 text-sm font-medium transition-all disabled:opacity-40 disabled:cursor-not-allowed;
+  }
+  .btn-primary {
+    @apply btn bg-[#f5f1ea] text-black hover:bg-white;
+  }
+  .btn-secondary {
+    @apply btn border border-[#2a2a2a] bg-transparent text-[#f5f1ea] hover:border-[#4a4a4a] hover:bg-[#0d0d0d];
+  }
+  .btn-copper {
+    @apply btn text-white;
+    background: var(--copper);
+  }
+  .btn-copper:hover {
+    background: var(--copper-d);
+  }
+  .btn-danger {
+    @apply btn border border-red-900/60 bg-red-950/40 text-red-200 hover:bg-red-900/50;
+  }
+  .btn-success {
+    @apply btn bg-emerald-700/80 text-white hover:bg-emerald-700;
+  }
+  .badge {
+    @apply inline-flex items-center rounded-full px-3 py-1 text-xs font-medium;
+  }
+  .display {
+    @apply font-serif font-light tracking-tight;
+  }
+}
+
+/* Subtle texture overlay on hero */
+.grain::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background-image: url("data:image/svg+xml;utf8,<svg viewBox='0 0 200 200' xmlns='http://www.w3.org/2000/svg'><filter id='n'><feTurbulence type='fractalNoise' baseFrequency='0.85' /></filter><rect width='100%25' height='100%25' filter='url(%23n)' opacity='0.5'/></svg>");
+  opacity: 0.04;
+  mix-blend-mode: overlay;
+  pointer-events: none;
+}
