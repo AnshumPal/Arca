@@ -8,6 +8,11 @@ class Settings(BaseSettings):
     database_url: str
     app_env: str = "development"
 
+    # Phase 8: enable LLM-based semantic router.
+    # Default false → fast keyword classifier (existing behavior, tests unaffected).
+    # Set true in Render env vars to use the LLM classifier in production.
+    use_semantic_router: bool = False
+
     @property
     def async_database_url(self) -> str:
         """Ensure the URL is compatible with asyncpg.
