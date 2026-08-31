@@ -139,29 +139,50 @@ export default function ChatPage() {
                   {t.content}
                 </p>
                 {t.trace_id && (
-                  <div className="mt-4 flex items-center gap-2">
-                    <button
-                      onClick={() => rate(i, 1)}
-                      disabled={t.feedback !== null}
-                      className={`text-xs px-3 py-1 rounded-full border transition ${
-                        t.feedback === 1
-                          ? "border-[#c87f4a] text-[#c87f4a] bg-[#c87f4a]/10"
-                          : "border-[#1a1a1a] text-[#5a5550] hover:border-[#2a2a2a] hover:text-[#8a8378]"
-                      } disabled:opacity-100`}
-                    >
-                      ↑ good
-                    </button>
-                    <button
-                      onClick={() => rate(i, -1)}
-                      disabled={t.feedback !== null}
-                      className={`text-xs px-3 py-1 rounded-full border transition ${
-                        t.feedback === -1
-                          ? "border-red-700 text-red-300 bg-red-950/40"
-                          : "border-[#1a1a1a] text-[#5a5550] hover:border-[#2a2a2a] hover:text-[#8a8378]"
-                      } disabled:opacity-100`}
-                    >
-                      ↓ off
-                    </button>
+                  <div className="mt-6 max-w-3xl">
+                    {t.feedback === null ? (
+                      <div className="flex items-center justify-between rounded-2xl border border-[#c87f4a]/30 bg-[#c87f4a]/5 px-5 py-4">
+                        <span className="text-sm text-[#f5f1ea]">
+                          Was this helpful?{" "}
+                          <span className="text-[#8a8378]">
+                            (your feedback trains the optimizer)
+                          </span>
+                        </span>
+                        <div className="flex items-center gap-2">
+                          <button
+                            onClick={() => rate(i, 1)}
+                            className="btn-copper text-sm px-4 py-2"
+                            aria-label="Mark helpful"
+                          >
+                            👍 Yes
+                          </button>
+                          <button
+                            onClick={() => rate(i, -1)}
+                            className="btn-secondary text-sm px-4 py-2"
+                            aria-label="Mark not helpful"
+                          >
+                            👎 No
+                          </button>
+                        </div>
+                      </div>
+                    ) : (
+                      <div
+                        className={`flex items-center gap-3 rounded-2xl border px-5 py-3 text-sm ${
+                          t.feedback === 1
+                            ? "border-[#c87f4a]/40 bg-[#c87f4a]/10 text-[#c87f4a]"
+                            : "border-red-900/40 bg-red-950/30 text-red-300"
+                        }`}
+                      >
+                        <span>
+                          {t.feedback === 1 ? "👍" : "👎"}
+                        </span>
+                        <span>
+                          {t.feedback === 1
+                            ? "Thanks — feedback recorded."
+                            : "Noted — this feeds into the next optimizer cycle."}
+                        </span>
+                      </div>
+                    )}
                   </div>
                 )}
               </div>
