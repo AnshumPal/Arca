@@ -13,6 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import AsyncSessionLocal
 from app.evaluator import evaluate_trace
+from app.judge import judge_trace
 from app.models import EvalRun, EvalScore, Trace
 
 logger = logging.getLogger(__name__)
@@ -59,7 +60,7 @@ async def run_eval_for_trace(trace_id: str, db: AsyncSession) -> EvalRun:
         await db.execute(delete(EvalScore).where(EvalScore.eval_run_id == eval_run.id))
         await db.flush()
 
-    # Insert dimension scores
+    # Insert deterministic dimension scores (Phase 3)
     for dim in eval_result.dimensions:
         eval_score = EvalScore(
             eval_run_id=eval_run.id,
@@ -69,6 +70,26 @@ async def run_eval_for_trace(trace_id: str, db: AsyncSession) -> EvalRun:
             reasoning=dim.reasoning,
         )
         db.add(eval_score)
+
+    # Optional 5th LLM-as-judge dimension (Phase 9, feature-flagged).
+    # Runs AFTER the pure evaluator, wrapped in try/except so a broken judge
+    # never breaks the base 4-dimension score.
+    try:
+        judgment = await judge_trace(trace)
+        if judgment is not None:
+            db.add(EvalScore(
+                eval_run_id=eval_run.id,
+                trace_id=tid,
+                dimension=judgment.dimension,
+                score=judgment.score,
+                reasoning=judgment.reasoning,
+            ))
+            logger.info(
+                "Judge score for trace %s: %.2f | %s",
+                trace_id, judgment.score, judgment.reasoning[:80],
+            )
+    except Exception as exc:
+        logger.error("Judge dimension failed for trace %s: %s (base 4-dim score kept)", trace_id, exc)
 
     await db.commit()
     await db.refresh(eval_run)

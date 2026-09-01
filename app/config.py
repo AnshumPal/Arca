@@ -13,6 +13,11 @@ class Settings(BaseSettings):
     # Set true in Render env vars to use the LLM classifier in production.
     use_semantic_router: bool = False
 
+    # Phase 9: enable LLM-as-judge quality dimension.
+    # Default false → 4-dimension evaluator only (existing behavior).
+    # Set true to add a 5th 'judgment' score per trace via one extra LLM call.
+    use_llm_judge: bool = False
+
     @property
     def async_database_url(self) -> str:
         """Ensure the URL is compatible with asyncpg.
