@@ -28,7 +28,7 @@ import logging
 from dataclasses import dataclass
 from typing import Optional
 
-from app.agents.base import get_client
+from app.agents.base import _resolve_model, get_client
 from app.config import settings
 from app.models import Trace
 
@@ -85,7 +85,7 @@ async def judge_trace(trace: Trace) -> Optional[JudgmentResult]:
     try:
         client = get_client()
         completion = await client.chat.completions.create(
-            model=settings.openai_model,
+            model=_resolve_model(),
             messages=[
                 {"role": "system", "content": JUDGE_SYSTEM_PROMPT},
                 {"role": "user",   "content": user_message},

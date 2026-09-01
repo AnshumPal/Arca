@@ -20,7 +20,7 @@ Design decisions:
 
 import logging
 
-from app.agents.base import get_client
+from app.agents.base import _resolve_model, get_client
 from app.config import settings
 from app.router import ARCA_SELF_KEYWORDS, classify as classify_keyword
 
@@ -62,7 +62,7 @@ async def classify_semantic(message: str) -> str:
     try:
         client = get_client()
         completion = await client.chat.completions.create(
-            model=settings.openai_model,
+            model=_resolve_model(),
             messages=[
                 {"role": "system", "content": CLASSIFIER_SYSTEM_PROMPT},
                 {"role": "user",   "content": message},

@@ -13,7 +13,7 @@ from dataclasses import dataclass
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.agents.base import get_client
+from app.agents.base import _resolve_model, get_client
 from app.analyzer import FailurePattern
 from app.config import settings
 
@@ -90,7 +90,7 @@ async def propose_improvement(
     client = get_client()
     try:
         completion = await client.chat.completions.create(
-            model=settings.openai_model,
+            model=_resolve_model(),
             messages=[
                 {"role": "system", "content": PROPOSER_SYSTEM_PROMPT},
                 {"role": "user",   "content": user_message},
@@ -129,6 +129,6 @@ async def propose_improvement(
         reasoning=reasoning,
         sandbox_config={
             "system_prompt": proposed_prompt,
-            "model": settings.openai_model,
+            "model": _resolve_model(),   # never bake in a deprecated name
         },
     )

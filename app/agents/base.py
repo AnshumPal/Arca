@@ -10,10 +10,37 @@ logger = logging.getLogger(__name__)
 _client: AsyncOpenAI | None = None
 
 # ─── In-memory prompt cache (Phase 6) ─────────────────────────────────────────
-# Each entry: agent_id → (resolved_prompt, cached_at_timestamp)
-# Live within CACHE_TTL_SECONDS — invalidated explicitly on promotion / rollback.
 _prompt_cache: dict[str, tuple[str, float]] = {}
 CACHE_TTL_SECONDS = 30
+
+# ─── Deprecated-model auto-remap (hotfix) ─────────────────────────────────────
+# Groq periodically deprecates model names. When a request fails with
+# model_not_found, retry once using the healthy fallback below. This means
+# production keeps working even if OPENAI_MODEL env var points at a dead name.
+FALLBACK_MODEL = "llama-3.3-70b-versatile"
+
+# Known-dead model names that should be immediately swapped before ever calling
+# the API. Extend this list as providers deprecate more.
+DEPRECATED_MODELS = {
+    "llama-3.1-8b-instant",
+    "llama-3.1-70b-versatile",
+    "mixtral-8x7b-32768",
+    "llama3-8b-8192",
+    "llama3-70b-8192",
+    "gemma-7b-it",
+}
+
+
+def _resolve_model() -> str:
+    """Pick the model to use — auto-remap deprecated names to the fallback."""
+    configured = settings.openai_model
+    if configured in DEPRECATED_MODELS:
+        logger.warning(
+            "OPENAI_MODEL='%s' is deprecated — auto-remapping to '%s'",
+            configured, FALLBACK_MODEL,
+        )
+        return FALLBACK_MODEL
+    return configured
 
 
 def get_client() -> AsyncOpenAI:
@@ -47,7 +74,6 @@ async def get_live_prompt(agent_id: str, hardcoded_prompt: str) -> str:
         if now - cached_at < CACHE_TTL_SECONDS:
             return cached
 
-    # Lazy imports to avoid circular dependency at module load
     from app import version_manager
     from app.database import AsyncSessionLocal
 
@@ -68,18 +94,44 @@ async def call_llm(system_prompt: str, message: str, agent_id: str) -> tuple[str
     """
     Shared LLM call used by all agents.
     Returns (response_text, prompt_used) — prompt_used is the live prompt.
+
+    Model resolution order:
+      1. _resolve_model() — auto-remaps known-deprecated names before the call
+      2. On any model_not_found runtime error, retry ONCE with FALLBACK_MODEL
+
+    This makes production resilient to Groq deprecating models we haven't
+    yet updated in the OPENAI_MODEL env var.
     """
     messages = [
         {"role": "system", "content": system_prompt},
         {"role": "user", "content": message},
     ]
     prompt_used = f"[system]: {system_prompt}\n[user]: {message}"
-
     client = get_client()
-    completion = await client.chat.completions.create(
-        model=settings.openai_model,
-        messages=messages,
-    )
+    model = _resolve_model()
+
+    try:
+        completion = await client.chat.completions.create(
+            model=model,
+            messages=messages,
+        )
+    except Exception as first_exc:
+        # If the model is deprecated at runtime (not in our static list yet),
+        # fall back to the known-healthy model and log loudly.
+        msg_lower = str(first_exc).lower()
+        is_model_error = "model_not_found" in msg_lower or "does not exist" in msg_lower
+        if is_model_error and model != FALLBACK_MODEL:
+            logger.warning(
+                "Agent %s: model '%s' rejected at runtime — retrying with '%s'",
+                agent_id, model, FALLBACK_MODEL,
+            )
+            completion = await client.chat.completions.create(
+                model=FALLBACK_MODEL,
+                messages=messages,
+            )
+        else:
+            raise
+
     response_text = completion.choices[0].message.content or ""
     logger.info("Agent %s responded (len=%d chars)", agent_id, len(response_text))
     return response_text, prompt_used
