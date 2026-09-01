@@ -143,7 +143,26 @@ async def run_sandbox_shadow(
         if temperature is not None:
             call_kwargs["temperature"] = temperature
 
-        completion = await client.chat.completions.create(**call_kwargs)
+        try:
+            completion = await client.chat.completions.create(**call_kwargs)
+        except Exception as first_exc:
+            # If the sandbox's configured model is deprecated / not available,
+            # retry once with the current default model AND auto-suspend the
+            # sandbox so it stops polluting logs. The trace records both facts.
+            msg_lower = str(first_exc).lower()
+            is_model_error = "model_not_found" in msg_lower or "does not exist" in msg_lower
+            if is_model_error and model != settings.openai_model:
+                logger.warning(
+                    "Sandbox %s: model '%s' deprecated — retrying with default '%s' and suspending",
+                    sandbox.id, model, settings.openai_model,
+                )
+                call_kwargs["model"] = settings.openai_model
+                completion = await client.chat.completions.create(**call_kwargs)
+                # Auto-suspend so subsequent shadow runs skip this sandbox
+                sandbox.status = "suspended"
+                error = f"[auto-suspended: model '{model}' deprecated, retried with {settings.openai_model}]"
+            else:
+                raise
         output = completion.choices[0].message.content or ""
     except Exception as exc:
         error = str(exc)
